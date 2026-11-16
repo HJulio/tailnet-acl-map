@@ -2,7 +2,7 @@
 
 Paste a [Tailscale ACL](https://tailscale.com/kb/1018/acls) and see who reaches what, on which ports.
 
-**Live:** https://hjulio.github.io/tailnet-acl-map/
+**Live:** https://hache.xyz/tailnet-acl-map/
 
 ![screenshot](screenshot.png)
 
