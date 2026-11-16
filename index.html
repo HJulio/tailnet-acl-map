@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tailnet ACL Map</title>
+<meta name="description" content="Paste a Tailscale ACL and see who reaches what, on which ports. Runs entirely in your browser.">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f4f6f9; --panel:#ffffff; --fg:#1b2130; --muted:#5d6678; --line:#c9d0db; --soft:#e7ebf1;
+  --full:#b4530a; --ports:#0f7a78; --dead:#8a93a3; --err:#b42318;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#12161e; --panel:#1a202b; --fg:#e4e8ef; --muted:#9aa4b5; --line:#38414f; --soft:#242c39;
+  --full:#f0a24a; --ports:#3fc9bd; --dead:#6f7a8c; --err:#f97066; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.5}
+header{padding:20px max(16px,env(safe-area-inset-left)) 12px max(16px,env(safe-area-inset-right));display:flex;flex-wrap:wrap;gap:6px 24px;align-items:baseline}
+h1{font-size:22px;font-weight:600;margin:0;letter-spacing:-.01em}
+h2{font-size:16px;font-weight:600;margin:0 0 8px}
+.lede{color:var(--muted);margin:0;font-size:14px}
+.lede a{color:inherit}
+.app{display:grid;grid-template-columns:minmax(280px,380px) 1fr;gap:20px;padding:0 max(16px,env(safe-area-inset-right)) 40px max(16px,env(safe-area-inset-left))}
+@media (max-width:900px){.app{grid-template-columns:1fr}}
+.editor{display:grid;gap:8px;align-content:start;position:sticky;top:12px;max-height:calc(100vh - 24px)}
+@media (max-width:900px){.editor{position:static;max-height:none}}
+textarea{width:100%;min-height:52vh;resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.45;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);tab-size:2}
+textarea:focus{outline:2px solid var(--ports);outline-offset:1px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button{font:inherit;font-size:13px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--muted)}
+button:focus-visible{outline:2px solid var(--ports);outline-offset:1px}
+.err{color:var(--err);font-family:var(--mono);font-size:12px;white-space:pre-wrap;min-height:1.2em}
+.out{display:grid;gap:28px;min-width:0}
+figure{margin:0;display:grid;gap:10px}
+figcaption,.hint{color:var(--muted);font-size:13.5px;max-width:80ch;margin:0}
+.scroll{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px}
+svg{display:block;max-width:100%;height:auto;font-family:var(--sans)}
+.legend{display:flex;flex-wrap:wrap;gap:12px 22px;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.sw{width:22px;height:0;border-top:2.5px solid}
+.sw.full{border-color:var(--full)}.sw.ports{border-color:var(--ports)}.sw.member{border-color:var(--muted);opacity:.6}
+.sw.dead{border-color:var(--dead);border-top-style:dashed}
+code{font-family:var(--mono);font-size:.92em;background:var(--soft);padding:1px 5px;border-radius:3px}
+
+.node rect{fill:var(--panel);stroke:var(--line);stroke-width:1}
+.node text{fill:var(--fg);font-size:12.5px}
+.node .sub{fill:var(--muted);font-size:11px;font-family:var(--mono)}
+.node.dead rect{stroke-dasharray:4 3;stroke:var(--dead)}
+.node.dead text{fill:var(--dead)}
+.node.other rect{fill:var(--soft)}
+.node{cursor:pointer}
+.edge{fill:none;stroke-width:1.5}
+.edge.member{stroke:var(--muted);opacity:.55}
+.edge.full{stroke:var(--full);stroke-width:2.2}
+.edge.ports{stroke:var(--ports);stroke-width:2.2}
+.edge.dead{stroke:var(--dead);stroke-dasharray:4 3;opacity:.6}
+.pill rect{fill:var(--panel);stroke:var(--line)}
+.pill text{font-family:var(--mono);font-size:10.5px;fill:var(--fg)}
+.pill.full text{fill:var(--full)}.pill.ports text{fill:var(--ports)}
+.colhead{fill:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.dim{opacity:.12}
+.g .node,.g .edge,.g .pill{transition:opacity .15s}
+@media (prefers-reduced-motion:reduce){.g .node,.g .edge,.g .pill{transition:none}}
+
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
+.tblwrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;background:var(--soft)}
+tr:last-child td{border-bottom:0}
+td.mono{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+ul.notes{margin:0;padding-left:1.2em;display:grid;gap:8px;max-width:85ch}
+ul.notes li::marker{color:var(--muted)}
+.tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:3px;margin-right:6px;vertical-align:1px}
+.tag.full{background:color-mix(in srgb,var(--full) 16%,transparent);color:var(--full)}
+.tag.ports{background:color-mix(in srgb,var(--ports) 16%,transparent);color:var(--ports)}
+.tag.dead{background:var(--soft);color:var(--dead)}
+.matrix{width:auto}
+.matrix th span{writing-mode:vertical-rl;transform:rotate(180deg);text-transform:none;letter-spacing:0;font-family:var(--mono);font-size:12px;font-weight:500}
+.matrix td.cell{text-align:center;color:var(--ports);font-size:13px;min-width:34px}
+.matrix tr:nth-child(even) td{background:color-mix(in srgb,var(--soft) 50%,transparent)}
+footer{padding:0 16px 32px;color:var(--muted);font-size:13px;text-align:center}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<header>
+  <h1>Tailnet ACL Map</h1>
+  <p class="lede">Paste a Tailscale ACL (HuJSON with comments is fine) and see who reaches what, on which ports. Everything runs in your browser; nothing is uploaded.</p>
+</header>
+
+<div class="app">
+  <aside class="editor">
+    <div class="row">
+      <button id="sample" type="button">Load sample</button>
+      <button id="clear" type="button">Clear</button>
+    </div>
+    <textarea id="src" spellcheck="false" aria-label="Tailscale ACL policy file"></textarea>
+    <div id="err" class="err" role="status"></div>
+  </aside>
+
+  <main class="out" id="out">
+    <figure>
+      <h2>Grants: people → sources → destinations</h2>
+      <div class="scroll"><svg id="graph" class="g" role="img" aria-label="Access graph: people, the groups or rules they belong to, and the destinations each reaches with its ports."></svg></div>
+      <div class="legend">
+        <span><i class="sw full"></i>all ports (<code>*</code>)</span>
+        <span><i class="sw ports"></i>restricted ports</span>
+        <span><i class="sw member"></i>group membership</span>
+        <span><i class="sw dead"></i>group with no grant</span>
+      </div>
+      <p class="hint">Hover or tap a node to isolate its paths; tap again to release. A wildcard destination (<code>*</code>) already covers every other destination.</p>
+    </figure>
+
+    <section>
+      <h2>Group membership</h2>
+      <div class="tblwrap" id="matrix"></div>
+    </section>
+    <section class="grid2">
+      <div><h2>Per person</h2><div class="tblwrap" id="people"></div></div>
+      <div><h2>Tailscale SSH</h2><div class="tblwrap" id="ssh"></div></div>
+    </section>
+    <section class="grid2">
+      <div><h2>Tags and who may assign them</h2><div class="tblwrap" id="tags"></div></div>
+      <div><h2>Hosts</h2><div class="tblwrap" id="hosts"></div></div>
+    </section>
+    <section>
+      <h2>Things the map makes visible</h2>
+      <ul class="notes" id="notes"></ul>
+    </section>
+  </main>
+</div>
+<footer>Static page, no backend. <a href="https://github.com/HJulio/tailnet-acl-map">Source on GitHub</a>.</footer>
+
+<script>
+(function(){
+'use strict';
+// ---------- HuJSON: strip comments and trailing commas, then JSON.parse ----------
+function parseHuJSON(text){
+  let out='', i=0, inStr=false;
+  while(i<text.length){
+    const c=text[i], n=text[i+1];
+    if(inStr){ out+=c; if(c==='\\'){out+=n;i+=2;continue;} if(c==='"')inStr=false; i++; continue; }
+    if(c==='"'){inStr=true;out+=c;i++;continue;}
+    if(c==='/'&&n==='/'){ while(i<text.length&&text[i]!=='\n')i++; continue; }
+    if(c==='/'&&n==='*'){ i+=2; while(i<text.length&&!(text[i]==='*'&&text[i+1]==='/'))i++; i+=2; continue; }
+    out+=c; i++;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g,'$1'));
+}
+
+// ---------- model ----------
+const isUser = s => s.includes('@') && !s.startsWith('autogroup:');
+const isGroup = s => s.startsWith('group:');
+const compactPorts = ports => { const by={}, other=[]; ports.forEach(p=>{const m=p.match(/^(tcp|udp|icmp|sctp):(.+)$/); m?(by[m[1]]=by[m[1]]||[]).push(m[2]):other.push(p);});
+  return [...Object.entries(by).map(([k,v])=>k+' '+v.join('/')),...other].join(', '); };
+const trunc = (s,n) => s.length>n ? s.slice(0,n-1)+'…' : s;
+
+function normalizeRules(acl){
+  const rules=[];
+  (acl.grants||[]).forEach((g,i)=>{
+    const ip=(g.ip||['*']); const app=g.app?Object.keys(g.app).map(a=>'app:'+a.split('/').pop()):[];
+    rules.push({src:g.src||[], dst:g.dst||[], ports:compactPorts([...ip,...app])||'*', via:g.via, kind:'grant', i});
+  });
+  (acl.acls||[]).forEach((a,i)=>{
+    if((a.action||'accept')!=='accept') return;
+    const targets=new Map();
+    (a.dst||[]).forEach(d=>{ const k=d.lastIndexOf(':'); const t=k>0?d.slice(0,k):d, p=k>0?d.slice(k+1):'*';
+      const port=(a.proto?a.proto+':':'')+p; targets.set(t,(targets.get(t)||new Set()).add(port)); });
+    const dst=[...targets.keys()], ports=[...new Set([...targets.values()].flatMap(s=>[...s]))];
+    rules.push({src:a.src||[], dst, ports:compactPorts(ports)||'*', kind:'acl', i});
+  });
+  return rules;
+}
+
+function buildModel(acl){
+  const groups=acl.groups||{}, hosts=acl.hosts||{}, rules=normalizeRules(acl);
+  const ipsetMembers=n=>(acl.ipsets&&acl.ipsets[n]||[]).map(e=>e.replace(/^add\s+/,'')).filter(e=>!/^remove\s/.test(e));
+  const resolve=d=>{const h=d.replace(/^host:/,''); return hosts[h]?`${d} = ${hosts[h]}`:d;};
+  const people=new Set(), sources=new Map(), dests=new Map(), edges=new Map();
+  Object.values(groups).flat().filter(isUser).forEach(u=>people.add(u));
+
+  const sourceFor=(s,rule)=>{
+    if(isGroup(s)){ const id='g:'+s; if(!sources.has(id)) sources.set(id,{id,label:s,members:(groups[s]||[]).filter(isUser),sub:(groups[s]||[]).length+' members'}); return id; }
+    if(isUser(s)){ people.add(s); const users=rule.src.filter(isUser); const id='u:'+rule.kind+rule.i;
+      if(!sources.has(id)) sources.set(id,{id,label:'direct rule',members:users,sub:users.length>2?users.length+' users':users.join(', ')}); return id; }
+    const id='o:'+s; if(!sources.has(id)) sources.set(id,{id,label:s,members:[],other:true,sub:s.startsWith('tag:')?'tagged nodes':s.startsWith('autogroup:')?'autogroup':'host / CIDR'}); return id;
+  };
+  rules.forEach(rule=>{
+    const dkey=rule.dst.join(' + ')||'(none)', did='d:'+dkey;
+    if(!dests.has(did)) dests.set(did,{id:did,label:rule.dst[0]||'(none)',lines:rule.dst.flatMap(d=>d.startsWith('ipset:')?[d,...ipsetMembers(d).map(m=>'  '+resolve(m))]:[resolve(d)]),targets:rule.dst.flatMap(d=>d.startsWith('ipset:')?ipsetMembers(d):[d])});
+    const seen=new Set();
+    rule.src.forEach(s=>{ const sid=sourceFor(s,rule); if(seen.has(sid))return; seen.add(sid);
+      const k=sid+'>'+did, e=edges.get(k); const ports=rule.ports+(rule.via?' via '+rule.via.join(','):'');
+      if(e){ if(!e.ports.includes(ports)) e.ports.push(ports); } else edges.set(k,{src:sid,dst:did,ports:[ports]}); });
+  });
+  // groups that no rule uses
+  Object.keys(groups).forEach(g=>{ if(!sources.has('g:'+g)) sources.set('g:'+g,{id:'g:'+g,label:g,members:groups[g].filter(isUser),dead:true,sub:'no grant references it'}); });
+  return {acl,groups,hosts,rules,people:[...people].sort(),sources:[...sources.values()],dests:[...dests.values()],edges:[...edges.values()]};
+}
+
+// ---------- graph ----------
+const NS='http://www.w3.org/2000/svg';
+const el=(t,a,txt)=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);if(txt!=null)n.textContent=txt;return n;};
+const textW = s => s.length*6.6+24;
+
+function drawGraph(m){
+  const svg=document.getElementById('graph'); svg.replaceChildren();
+  const MAXL=46, LINEH=14, GAP=20, top=40;
+  const cols=[
+    {key:'p', title:'People', items:m.people.map(p=>({id:'p:'+p,label:trunc(p,MAXL),lines:[]}))},
+    {key:'s', title:'Sources (groups / rules / tags)', items:m.sources.map(s=>({...s,label:trunc(s.label,MAXL),lines:s.sub?[trunc(s.sub,MAXL)]:[]}))},
+    {key:'d', title:'Destinations', items:m.dests.map(d=>({...d,label:trunc(d.label,MAXL),lines:(d.lines.length>1?d.lines.slice(1):[]).slice(0,5).map(l=>trunc(l,MAXL)).concat(d.lines.length>6?['+'+(d.lines.length-6)+' more']:[])}))},
+  ];
+  cols.forEach(c=>{ c.w=Math.min(360,Math.max(180,...c.items.flatMap(it=>[it.label,...it.lines].map(textW))));
+    c.items.forEach(it=>it.h=30+LINEH*it.lines.length); c.total=c.items.reduce((a,it)=>a+it.h+GAP,-GAP); });
+  const H=top+Math.max(80,...cols.map(c=>c.total))+20;
+  const colGap=170; let x=0;
+  cols.forEach(c=>{ c.x=x; x+=c.w+colGap; let y=top+(H-top-20-c.total)/2; c.items.forEach(it=>{it.x=c.x;it.w=c.w;it.y=y+it.h/2;y+=it.h+GAP;}); });
+  const W=x-colGap;
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`); svg.style.minWidth=Math.min(W,1100)+'px';
+  const pos={}; cols.forEach(c=>c.items.forEach(it=>pos[it.id]=it));
+  cols.forEach(c=>svg.appendChild(el('text',{x:c.x+12,y:22,class:'colhead'},c.title)));
+  const curve=(a,b)=>{const x1=a.x+a.w,x2=b.x,dx=(x2-x1)/2;return `M${x1} ${a.y} C${x1+dx} ${a.y},${x2-dx} ${b.y},${x2} ${b.y}`;};
+
+  const edges=[],pills=[],nodes=[];
+  m.sources.forEach(s=>s.members.forEach(mem=>{ const a=pos['p:'+mem]; if(!a)return;
+    const e=el('path',{d:curve(a,pos[s.id]),class:'edge member'+(s.dead?' dead':'')}); e.dataset.keys=`p:${mem} ${s.id}`; svg.appendChild(e); edges.push(e); }));
+  m.edges.forEach(g=>{ const a=pos[g.src],b=pos[g.dst],label=g.ports.join(' · '),cls=g.ports.every(p=>/^\*( via|$)/.test(p))?'full':'ports';
+    const e=el('path',{d:curve(a,b),class:'edge '+cls}); e.dataset.keys=`${g.src} ${g.dst}`; svg.appendChild(e); edges.push(e);
+    const mx=(a.x+a.w+b.x)/2,my=(a.y+b.y)/2,t=trunc(label,24),tw=t.length*6.6+14;
+    const pill=el('g',{class:'pill '+cls}); pill.dataset.keys=e.dataset.keys;
+    pill.appendChild(el('title',{},label));
+    pill.appendChild(el('rect',{x:mx-tw/2,y:my-10,width:tw,height:20,rx:10}));
+    pill.appendChild(el('text',{x:mx,y:my+3.5,'text-anchor':'middle'},t)); svg.appendChild(pill); pills.push(pill); });
+  cols.forEach(c=>c.items.forEach(it=>{ const g=el('g',{class:'node'+(it.dead?' dead':'')+(it.other?' other':'')}); g.dataset.key=it.id;
+    g.appendChild(el('title',{},[it.id.slice(2),...(it.lines||[])].join('\n')));
+    g.appendChild(el('rect',{x:it.x,y:it.y-it.h/2,width:it.w,height:it.h,rx:4}));
+    const y0=it.y-it.h/2+19; g.appendChild(el('text',{x:it.x+12,y:y0},it.label));
+    it.lines.forEach((l,i)=>g.appendChild(el('text',{x:it.x+12,y:y0+LINEH*(i+1),class:'sub'},l)));
+    svg.appendChild(g); nodes.push(g); }));
+
+  const srcById=Object.fromEntries(m.sources.map(s=>[s.id,s]));
+  const lit=key=>{ const set=new Set([key]);
+    if(key[0]==='p') m.sources.filter(s=>s.members.includes(key.slice(2))).forEach(s=>{set.add(s.id);m.edges.filter(e=>e.src===s.id).forEach(e=>set.add(e.dst));});
+    if(key[0]!=='p'&&key[0]!=='d'){ const s=srcById[key]; s.members.forEach(u=>set.add('p:'+u)); m.edges.filter(e=>e.src===key).forEach(e=>set.add(e.dst)); }
+    if(key[0]==='d') m.edges.filter(e=>e.dst===key).forEach(e=>{set.add(e.src);srcById[e.src].members.forEach(u=>set.add('p:'+u));});
+    nodes.forEach(n=>n.classList.toggle('dim',!set.has(n.dataset.key)));
+    edges.concat(pills).forEach(e=>e.classList.toggle('dim',!e.dataset.keys.split(' ').every(k=>set.has(k)))); };
+  const clear=()=>nodes.concat(edges,pills).forEach(n=>n.classList.remove('dim'));
+  let pinned=null;
+  nodes.forEach(n=>{ n.addEventListener('mouseenter',()=>{if(!pinned)lit(n.dataset.key);});
+    n.addEventListener('mouseleave',()=>{if(!pinned)clear();});
+    n.addEventListener('click',()=>{pinned=pinned===n.dataset.key?null:n.dataset.key;pinned?lit(pinned):clear();}); });
+}
+
+// ---------- tables & notes ----------
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const table=(head,rows,empty)=>rows.length?`<table><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>${rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i===0?'mono':''}">${c}</td>`).join('')}</tr>`).join('')}</table>`:`<p class="hint">${empty}</p>`;
+
+function renderTables(m){
+  const {acl}=m, gnames=Object.keys(m.groups);
+  document.getElementById('matrix').innerHTML=gnames.length?`<table class="matrix"><tr><th>Person</th>${gnames.map(g=>`<th><span>${esc(g.slice(6))}</span></th>`).join('')}</tr>`+
+    m.people.map(p=>`<tr><td class="mono">${esc(p)}</td>${gnames.map(g=>`<td class="cell ${m.groups[g].includes(p)?'in':''}">${m.groups[g].includes(p)?'●':''}</td>`).join('')}</tr>`).join('')+
+    `<tr><td class="mono">grants</td>${gnames.map(g=>{const n=m.edges.filter(e=>e.src==='g:'+g).length;return `<td class="cell">${n||'<span class="tag dead">0</span>'}</td>`;}).join('')}</tr></table>`:'<p class="hint">No <code>groups</code> section.</p>';
+  document.getElementById('people').innerHTML=table(['Person','Groups','Reaches'],m.people.map(p=>{
+    const gs=Object.keys(m.groups).filter(g=>m.groups[g].includes(p));
+    const srcs=m.sources.filter(s=>s.members.includes(p)&&!s.dead).map(s=>s.id);
+    const reach=m.edges.filter(e=>srcs.includes(e.src)).map(e=>`${esc(e.dst.slice(2))} <span class="tag ${e.ports.every(x=>x.startsWith('*'))?'full':'ports'}">${esc(e.ports.join(' · '))}</span>`);
+    return [esc(p), gs.length?gs.map(g=>esc(g.slice(6))).join(', '):'<span class="tag dead">none</span>', reach.join('<br>')||'<span class="tag dead">nothing</span>'];
+  }),'No users found in groups or rules.');
+  document.getElementById('ssh').innerHTML=table(['Source','Destination','As users','Action'],(acl.ssh||[]).map(r=>[esc((r.src||[]).join(', ')),esc((r.dst||[]).join(', ')),esc((r.users||[]).join(', ')),esc(r.action||'')]),'No <code>ssh</code> section.');
+  const ap=acl.autoApprovers||{}, approves=t=>[...Object.entries(ap.routes||{}).filter(([,o])=>o.includes(t)).map(([r])=>'route '+r),...(ap.exitNode||[]).includes(t)?['exit node']:[]].join(', ');
+  document.getElementById('tags').innerHTML=table(['Tag','Owners','Auto-approves'],Object.entries(acl.tagOwners||{}).map(([t,o])=>[esc(t),o.length?esc(o.join(', ')):'<span class="tag dead">none</span> admin console only',esc(approves(t))]),'No <code>tagOwners</code> section.');
+  const rest=JSON.stringify({...acl,hosts:undefined});
+  document.getElementById('hosts').innerHTML=table(['Host','Address','Used'],Object.entries(m.hosts).map(([h,a])=>[esc(h),esc(a),new RegExp('host:'+h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'"').test(rest)||rest.includes('"'+h+'"')?'yes':'<span class="tag dead">unused</span>']),'No <code>hosts</code> section.');
+}
+
+function renderNotes(m){
+  const {acl}=m, notes=[], restOf=k=>JSON.stringify({...acl,[k]:undefined});
+  m.sources.filter(s=>s.dead).forEach(s=>notes.push(`<span class="tag dead">unused</span><code>${esc(s.label)}</code> appears in no grant${restOf('groups').includes('"'+s.label+'"')?' (only referenced outside grants, e.g. tagOwners or ssh)':''}.`));
+  m.edges.filter(e=>e.dst==='d:*'&&e.ports.some(p=>p==='*')).forEach(e=>{const s=m.sources.find(s=>s.id===e.src);notes.push(`<span class="tag full">all</span><code>${esc(s.label)}</code>${s.members.length?' ('+esc(s.members.join(', '))+')':''} reaches the entire tailnet on all ports.`);});
+  const grouped=new Set(Object.values(m.groups).flat()); m.people.filter(p=>!grouped.has(p)).forEach(p=>notes.push(`${esc(p)} belongs to no group and only has direct per-user grants.`));
+  Object.entries(acl.tagOwners||{}).filter(([,o])=>!o.length).forEach(([t])=>notes.push(`<code>${esc(t)}</code> has no owners, so it can only be applied from the admin console or a pre-authorised auth key.`));
+  const unusedHosts=Object.keys(m.hosts).filter(h=>{const r=restOf('hosts');return !new RegExp('host:'+h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'"').test(r)&&!r.includes('"'+h+'"');});
+  if(unusedHosts.length) notes.push(`${unusedHosts.length} of ${Object.keys(m.hosts).length} host aliases are not referenced by any rule (documentation only).`);
+  (acl.nodeAttrs||[]).filter(n=>(n.attr||[]).includes('funnel')).forEach(n=>notes.push(`Funnel is enabled for <code>${esc((n.target||[]).join(', '))}</code>, so those users can expose local services to the public internet.`));
+  const grantsWithoutIp=(acl.grants||[]).filter(g=>!g.ip&&!g.app).length; if(grantsWithoutIp) notes.push(`${grantsWithoutIp} grant(s) omit <code>ip</code>; Tailscale treats that as all ports.`);
+  // CIDR containment: a port-restricted destination that sits inside an all-ports destination reached by someone else
+  const cidr=t=>{const h=t.replace(/^host:/,''), v=m.hosts[h]||h, mt=v.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)(?:\/(\d+))?$/); if(!mt)return null;
+    const n=((+mt[1]<<24)+(+mt[2]<<16)+(+mt[3]<<8)+ +mt[4])>>>0, b=mt[5]?+mt[5]:32; return {t,n,b,v};};
+  const dcidrs=m.dests.flatMap(d=>d.targets.map(cidr).filter(Boolean).map(c=>({...c,d})));
+  const inside=(a,b)=>b.b<a.b&&((a.n^b.n)>>>(32-b.b))===0;
+  const overlaps=new Map();
+  dcidrs.forEach(a=>dcidrs.forEach(b=>{ if(a.d===b.d||!inside(a,b))return;
+    const wide=m.edges.filter(e=>e.dst===b.d.id&&e.ports.some(p=>p.startsWith('*'))), narrow=m.edges.filter(e=>e.dst===a.d.id&&e.ports.every(p=>!p.startsWith('*')));
+    if(!wide.length||!narrow.length)return; const who=wide.map(e=>m.sources.find(s=>s.id===e.src).label).join(', ');
+    const k=b.t+'|'+who; (overlaps.get(k)||overlaps.set(k,{b,who,a:[]}).get(k)).a.push(a); }));
+  overlaps.forEach(({b,who,a})=>notes.push(`<span class="tag full">overlap</span>${a.map(x=>`<code>${esc(x.t)}</code> (${esc(x.v)})`).join(', ')} ${a.length>1?'sit':'sits'} inside <code>${esc(b.t)}</code> (${esc(b.v)}): ${esc(who)} can reach ${a.length>1?'them':'it'} on all ports, bypassing the port restriction other rules apply.`));
+  if(!(acl.tests||[]).length) notes.push('No <code>tests</code> section: nothing guards these rules against regressions.'); else notes.push(`${acl.tests.length} test(s) defined across ${m.rules.length} rules.`);
+  if(acl.acls&&acl.grants) notes.push('Both legacy <code>acls</code> and <code>grants</code> are present; both are shown.');
+  document.getElementById('notes').innerHTML=notes.map(n=>`<li>${n}</li>`).join('')||'<li>Nothing unusual found.</li>';
+}
+
+// ---------- wiring ----------
+const srcEl=document.getElementById('src'), errEl=document.getElementById('err');
+function render(){
+  errEl.textContent='';
+  const text=srcEl.value.trim(); if(!text){ document.getElementById('graph').replaceChildren(); return; }
+  let acl; try{ acl=parseHuJSON(text); }catch(e){ errEl.textContent='Could not parse: '+e.message; return; }
+  try{ const m=buildModel(acl); drawGraph(m); renderTables(m); renderNotes(m); }
+  catch(e){ errEl.textContent='Could not render: '+e.message; console.error(e); }
+}
+let t; srcEl.addEventListener('input',()=>{clearTimeout(t);t=setTimeout(render,250);});
+document.getElementById('clear').addEventListener('click',()=>{srcEl.value='';render();srcEl.focus();});
+document.getElementById('sample').addEventListener('click',()=>{srcEl.value=SAMPLE;render();});
+
+const SAMPLE=`// Example Tailscale policy (HuJSON). Replace with your own.
+{
+  "groups": {
+    "group:owner":      ["alice@example.com", "bob@example.com"],
+    "group:admin":      ["carol@example.com", "dave@example.com"],
+    "group:platform":   ["alice@example.com", "bob@example.com"],
+    "group:analytics":  ["carol@example.com", "dave@example.com", "erin@example.com"],
+    "group:vendor-x":   ["carol@example.com", "erin@example.com", "dave@example.com", "alice@example.com", "bob@example.com"],
+  },
+  "hosts": {
+    "cloud":           "10.0.0.0/8",
+    "eu-west-pods":    "10.100.0.0/21",
+    "eu-west-services":"10.200.0.0/21",
+    "vendor-gitlab":   "10.0.13.104/32",
+    "vendor-wiki":     "10.0.13.66/32",
+    "vendor-artifacts":"10.110.64.212/32",
+    "bastion":         "100.117.83.94",
+    "analytics-0005":  "100.113.234.21",
+  },
+  "grants": [
+    { "src": ["group:owner"],      "dst": ["*"],                                                "ip": ["*"] },
+    { "src": ["carol@example.com", "erin@example.com"], "dst": ["autogroup:self"],            "ip": ["tcp:22", "tcp:5900", "tcp:80", "tcp:443"] },
+    { "src": ["group:analytics"],  "dst": ["tag:analytics-network", "tag:analytics-exit-node"], "ip": ["*"] },
+    { "src": ["tag:analytics-network"], "dst": ["tag:analytics-network", "tag:analytics-exit-node"], "ip": ["*"] },
+    { "src": ["tag:analytics-network"], "dst": ["autogroup:internet"], "ip": ["*"], "via": ["tag:analytics-exit-node"] },
+    { "src": ["group:platform"],   "dst": ["host:cloud", "tag:cloud-network"],                  "ip": ["*"] },
+    { "src": ["group:vendor-x"],   "dst": ["ipset:VendorX", "tag:vendor-network"],              "ip": ["tcp:22", "tcp:80", "tcp:443", "udp:53"] },
+    { "src": ["frank@example.com"],"dst": ["host:bastion", "host:analytics-0005"],              "ip": ["*"] },
+  ],
+  "ipsets": {
+    "ipset:VendorX": ["add host:vendor-gitlab", "add host:vendor-wiki", "add host:vendor-artifacts"],
+  },
+  "tagOwners": {
+    "tag:cloud-network":        [],
+    "tag:k8s-operator":         [],
+    "tag:analytics-network":    ["group:analytics", "tag:k8s-operator"],
+    "tag:analytics-exit-node":  ["group:analytics"],
+    "tag:vendor-network":       [],
+  },
+  "autoApprovers": {
+    "routes": { "10.0.0.0/8": ["tag:cloud-network"] },
+    "exitNode": ["tag:analytics-exit-node"],
+  },
+  "ssh": [
+    { "action": "accept", "src": ["autogroup:member"], "dst": ["tag:analytics-network"], "users": ["analytics"] },
+  ],
+  "nodeAttrs": [ { "target": ["autogroup:member"], "attr": ["funnel"] } ],
+  "tests": [
+    { "src": "group:platform",  "accept": ["10.0.0.100:443"] },
+    { "src": "group:analytics", "deny":   ["10.0.0.100:443"] },
+  ],
+}`;
+srcEl.value=SAMPLE; render();
+})();
+</script>
+</body>
+</html>
