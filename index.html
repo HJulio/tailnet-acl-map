@@ -80,6 +80,9 @@ ul.notes li::marker{color:var(--muted)}
 .tag.full{background:color-mix(in srgb,var(--full) 16%,transparent);color:var(--full)}
 .tag.ports{background:color-mix(in srgb,var(--ports) 16%,transparent);color:var(--ports)}
 .tag.dead{background:var(--soft);color:var(--dead)}
+.tag.err{background:color-mix(in srgb,var(--err) 14%,transparent);color:var(--err)}
+.tag.warn{background:color-mix(in srgb,var(--full) 16%,transparent);color:var(--full)}
+#problems li{font-family:var(--mono);font-size:12.5px}
 .matrix{width:auto}
 .matrix th span{writing-mode:vertical-rl;transform:rotate(180deg);text-transform:none;letter-spacing:0;font-family:var(--mono);font-size:12px;font-weight:500}
 .matrix td.cell{text-align:center;color:var(--ports);font-size:13px;min-width:34px}
@@ -105,6 +108,10 @@ footer a{color:inherit}
   </aside>
 
   <main class="out" id="out">
+    <section id="probsec" hidden>
+      <h2>Problems <span id="probsum" class="hint" style="display:inline;font-weight:400"></span></h2>
+      <ul class="notes" id="problems"></ul>
+    </section>
     <figure>
       <h2>Grants: people → sources → destinations</h2>
       <div class="scroll"><svg id="graph" class="g" role="img" aria-label="Access graph: people, the groups or rules they belong to, and the destinations each reaches with its ports."></svg></div>
@@ -147,11 +154,17 @@ function parseHuJSON(text){
     const c=text[i], n=text[i+1];
     if(inStr){ out+=c; if(c==='\\'){out+=n;i+=2;continue;} if(c==='"')inStr=false; i++; continue; }
     if(c==='"'){inStr=true;out+=c;i++;continue;}
-    if(c==='/'&&n==='/'){ while(i<text.length&&text[i]!=='\n')i++; continue; }
-    if(c==='/'&&n==='*'){ i+=2; while(i<text.length&&!(text[i]==='*'&&text[i+1]==='/'))i++; i+=2; continue; }
+    if(c==='/'&&n==='/'){ while(i<text.length&&text[i]!=='\n'){out+=' ';i++;} continue; }
+    if(c==='/'&&n==='*'){ out+='  '; i+=2; while(i<text.length&&!(text[i]==='*'&&text[i+1]==='/')){out+=text[i]==='\n'?'\n':' ';i++;} out+='  '; i+=2; continue; }
     out+=c; i++;
   }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g,'$1'));
+  return JSON.parse(out.replace(/,(\s*[}\]])/g,' $1'));
+}
+function describeParseError(text,e){
+  const m=e.message.match(/line (\d+) column (\d+)/)||(()=>{const p=e.message.match(/position (\d+)/); if(!p)return null; const before=text.slice(0,+p[1]); const line=before.split('\n').length; return [0,line,before.length-before.lastIndexOf('\n')];})();
+  if(!m) return e.message;
+  const line=+m[1], col=+m[2], src=(text.split('\n')[line-1]||'').trim();
+  return `${e.message.replace(/\s*\(line.*$|\s*in JSON at position.*$|\s*at position.*$/,'')} at line ${line}, column ${col}: ${src.slice(0,80)}`;
 }
 
 // ---------- model ----------
@@ -174,6 +187,10 @@ function normalizeRules(acl){
       const port=(a.proto?a.proto+':':'')+p; targets.set(t,(targets.get(t)||new Set()).add(port)); });
     const dst=[...targets.keys()], ports=[...new Set([...targets.values()].flatMap(s=>[...s]))];
     rules.push({src:a.src||[], dst, ports:compactPorts(ports)||'*', kind:'acl', i});
+  });
+  (acl.ssh||[]).forEach((r,i)=>{
+    if((r.action||'accept')==='deny') return;
+    rules.push({src:r.src||[], dst:r.dst||[], ports:'ssh as '+((r.users||[]).join('/')||'?')+(r.action==='check'?' (check)':''), kind:'ssh', i});
   });
   return rules;
 }
@@ -228,16 +245,19 @@ function drawGraph(m){
   cols.forEach(c=>svg.appendChild(el('text',{x:c.x+12,y:22,class:'colhead'},c.title)));
   const curve=(a,b)=>{const x1=a.x+a.w,x2=b.x,dx=(x2-x1)/2;return `M${x1} ${a.y} C${x1+dx} ${a.y},${x2-dx} ${b.y},${x2} ${b.y}`;};
 
-  const edges=[],pills=[],nodes=[];
+  const edges=[],pills=[],nodes=[],placed=[];
   m.sources.forEach(s=>s.members.forEach(mem=>{ const a=pos['p:'+mem]; if(!a)return;
     const e=el('path',{d:curve(a,pos[s.id]),class:'edge member'+(s.dead?' dead':'')}); e.dataset.keys=`p:${mem} ${s.id}`; svg.appendChild(e); edges.push(e); }));
-  m.edges.forEach(g=>{ const a=pos[g.src],b=pos[g.dst],label=g.ports.join(' · '),cls=g.ports.every(p=>/^\*( via|$)/.test(p))?'full':'ports';
+  m.edges.forEach((g,gi)=>{ const a=pos[g.src],b=pos[g.dst],label=g.ports.join(' · '),cls=g.ports.every(p=>/^\*( via|$)/.test(p))?'full':'ports';
     const e=el('path',{d:curve(a,b),class:'edge '+cls}); e.dataset.keys=`${g.src} ${g.dst}`; svg.appendChild(e); edges.push(e);
-    const mx=(a.x+a.w+b.x)/2,my=(a.y+b.y)/2,t=trunc(label,24),tw=t.length*6.6+14;
+    const tt=[0.5,0.3,0.7][gi%3], x1=a.x+a.w, x2=b.x, dx=(x2-x1)/2, u=1-tt;
+    const mx=u*u*u*x1+3*u*u*tt*(x1+dx)+3*u*tt*tt*(x2-dx)+tt*tt*tt*x2, my=(u*u*u+3*u*u*tt)*a.y+(3*u*tt*tt+tt*tt*tt)*b.y, t=trunc(label,24),tw=t.length*6.6+14;
+    let py=my; for(let k=0;k<6&&placed.some(b=>Math.abs(b.x-mx)<(b.w+tw)/2+4&&Math.abs(b.y-py)<22);k++) py+=k%2?-(k+1)*11:(k+1)*11;
+    placed.push({x:mx,y:py,w:tw});
     const pill=el('g',{class:'pill '+cls}); pill.dataset.keys=e.dataset.keys;
     pill.appendChild(el('title',{},label));
-    pill.appendChild(el('rect',{x:mx-tw/2,y:my-10,width:tw,height:20,rx:10}));
-    pill.appendChild(el('text',{x:mx,y:my+3.5,'text-anchor':'middle'},t)); svg.appendChild(pill); pills.push(pill); });
+    pill.appendChild(el('rect',{x:mx-tw/2,y:py-10,width:tw,height:20,rx:10}));
+    pill.appendChild(el('text',{x:mx,y:py+3.5,'text-anchor':'middle'},t)); svg.appendChild(pill); pills.push(pill); });
   cols.forEach(c=>c.items.forEach(it=>{ const g=el('g',{class:'node'+(it.dead?' dead':'')+(it.other?' other':'')}); g.dataset.key=it.id;
     g.appendChild(el('title',{},[it.id.slice(2),...(it.lines||[])].join('\n')));
     g.appendChild(el('rect',{x:it.x,y:it.y-it.h/2,width:it.w,height:it.h,rx:4}));
@@ -278,7 +298,7 @@ function renderTables(m){
   const ap=acl.autoApprovers||{}, approves=t=>[...Object.entries(ap.routes||{}).filter(([,o])=>o.includes(t)).map(([r])=>'route '+r),...(ap.exitNode||[]).includes(t)?['exit node']:[]].join(', ');
   document.getElementById('tags').innerHTML=table(['Tag','Owners','Auto-approves'],Object.entries(acl.tagOwners||{}).map(([t,o])=>[esc(t),o.length?esc(o.join(', ')):'<span class="tag dead">none</span> admin console only',esc(approves(t))]),'No <code>tagOwners</code> section.');
   const rest=JSON.stringify({...acl,hosts:undefined});
-  document.getElementById('hosts').innerHTML=table(['Host','Address','Used'],Object.entries(m.hosts).map(([h,a])=>[esc(h),esc(a),new RegExp('host:'+h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'"').test(rest)||rest.includes('"'+h+'"')?'yes':'<span class="tag dead">unused</span>']),'No <code>hosts</code> section.');
+  document.getElementById('hosts').innerHTML=table(['Host','Address','Used'],Object.entries(m.hosts).map(([h,a])=>[esc(h),esc(a),new RegExp('[":\\s]'+h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'[":]').test(rest)?'yes':'<span class="tag dead">unused</span>']),'No <code>hosts</code> section.');
 }
 
 function renderNotes(m){
@@ -287,7 +307,7 @@ function renderNotes(m){
   m.edges.filter(e=>e.dst==='d:*'&&e.ports.some(p=>p==='*')).forEach(e=>{const s=m.sources.find(s=>s.id===e.src);notes.push(`<span class="tag full">all</span><code>${esc(s.label)}</code>${s.members.length?' ('+esc(s.members.join(', '))+')':''} reaches the entire tailnet on all ports.`);});
   const grouped=new Set(Object.values(m.groups).flat()); m.people.filter(p=>!grouped.has(p)).forEach(p=>notes.push(`${esc(p)} belongs to no group and only has direct per-user grants.`));
   Object.entries(acl.tagOwners||{}).filter(([,o])=>!o.length).forEach(([t])=>notes.push(`<code>${esc(t)}</code> has no owners, so it can only be applied from the admin console or a pre-authorised auth key.`));
-  const unusedHosts=Object.keys(m.hosts).filter(h=>{const r=restOf('hosts');return !new RegExp('host:'+h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'"').test(r)&&!r.includes('"'+h+'"');});
+  const unusedHosts=Object.keys(m.hosts).filter(h=>{const r=restOf('hosts');return !new RegExp('[":\\s]'+h.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'[":]').test(r);});
   if(unusedHosts.length) notes.push(`${unusedHosts.length} of ${Object.keys(m.hosts).length} host aliases are not referenced by any rule (documentation only).`);
   (acl.nodeAttrs||[]).filter(n=>(n.attr||[]).includes('funnel')).forEach(n=>notes.push(`Funnel is enabled for <code>${esc((n.target||[]).join(', '))}</code>, so those users can expose local services to the public internet.`));
   const grantsWithoutIp=(acl.grants||[]).filter(g=>!g.ip&&!g.app).length; if(grantsWithoutIp) notes.push(`${grantsWithoutIp} grant(s) omit <code>ip</code>; Tailscale treats that as all ports.`);
@@ -307,12 +327,78 @@ function renderNotes(m){
   document.getElementById('notes').innerHTML=notes.map(n=>`<li>${n}</li>`).join('')||'<li>Nothing unusual found.</li>';
 }
 
+// ---------- validation ----------
+const AUTOGROUPS=new Set(['member','self','internet','admin','owner','it-admin','network-admin','auditor','billing-admin','tagged','nonroot','danger-all','shared']);
+function validate(acl){
+  const P=[], err=m=>P.push({l:'error',m}), warn=m=>P.push({l:'warn',m});
+  const groups=acl.groups||{}, hosts=acl.hosts||{}, tags=acl.tagOwners||{}, ipsets=acl.ipsets||{};
+  const ip4=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,3}))?$/, ip6=/^[0-9a-f:]{2,39}(?:\/(\d{1,3}))?$/i;
+  const checkAddr=(v,where)=>{ let m;
+    if((m=v.match(ip4))){ const o=m.slice(1,5).map(Number), b=m[5]==null?32:+m[5];
+      if(o.some(x=>x>255)) err(`${where}: octet out of range in ${v}`);
+      else if(b>32) err(`${where}: prefix /${m[5]} is longer than 32 in ${v}`);
+      else { const n=((o[0]<<24)+(o[1]<<16)+(o[2]<<8)+o[3])>>>0, mask=b===0?0:(0xffffffff<<(32-b))>>>0;
+        if((n&~mask)>>>0) { const c=(n&mask)>>>0; warn(`${where}: ${v} has host bits set; the network is ${[c>>>24,(c>>>16)&255,(c>>>8)&255,c&255].join('.')}/${b}`); } }
+      return true; }
+    if(v.includes(':')&&(m=v.match(ip6))){ if(m[1]&&+m[1]>128) err(`${where}: prefix /${m[1]} is longer than 128 in ${v}`); return true; }
+    return false; };
+  const ports=(spec,where)=>{ if(spec==='*')return; spec.split(',').forEach(r=>{ if(!/^\d+(-\d+)?$/.test(r)){err(`${where}: "${spec}" is not a valid port list (use 22, 80-90, *)`);return;}
+    const [a,b]=r.split('-').map(Number); if(a>65535||b>65535) err(`${where}: port ${r} is above 65535`); if(b!=null&&b<a) err(`${where}: port range ${r} is reversed`); }); };
+  const refs=[]; const collect=(arr,where)=>(Array.isArray(arr)?arr:[]).forEach(x=>typeof x==='string'?refs.push([x,where]):err(`${where}: expected a string, got ${JSON.stringify(x)}`));
+
+  Object.entries(groups).forEach(([g,mem])=>{ if(!g.startsWith('group:')) err(`groups: "${g}" must start with group:`);
+    if(!Array.isArray(mem)) {err(`groups.${g}: must be a list`);return;} if(!mem.length) warn(`groups.${g} is empty`);
+    mem.forEach(u=>{ if(!/^[^@\s]+@[^@\s]+$/.test(u)) err(`groups.${g}: "${u}" is not a user login (groups cannot contain groups or tags)`); }); });
+  Object.entries(hosts).forEach(([h,v])=>{ if(typeof v!=='string'||!checkAddr(v,`hosts.${h}`)) err(`hosts.${h}: "${v}" is not an IP address or CIDR`); });
+  Object.entries(tags).forEach(([t,o])=>{ if(!t.startsWith('tag:')) err(`tagOwners: "${t}" must start with tag:`); collect(o,`tagOwners.${t}`); });
+  Object.entries(ipsets).forEach(([n,e])=>{ if(!n.startsWith('ipset:')) err(`ipsets: "${n}" must start with ipset:`);
+    (Array.isArray(e)?e:[]).forEach(x=>{ const m=String(x).match(/^(add|remove)\s+(\S+)$/); m?refs.push([m[2],`ipsets.${n}`]):err(`ipsets.${n}: "${x}" must be "add <target>" or "remove <target>"`); }); });
+  (acl.grants||[]).forEach((g,i)=>{ const w=`grants[${i}]`;
+    if(!(g.src||[]).length) err(`${w} has no src`); if(!(g.dst||[]).length) err(`${w} has no dst`); if(!g.ip&&!g.app) warn(`${w} has neither ip nor app, so it allows all ports`);
+    collect(g.src,w+'.src'); collect(g.dst,w+'.dst'); collect(g.via,w+'.via');
+    (g.ip||[]).forEach(p=>{ const m=String(p).match(/^(\*|(?:[a-z]+|\d+)(?::(.+))?)$/); if(!m) err(`${w}.ip: "${p}" is not a valid port spec (tcp:22, udp:53-60, icmp:*, *)`); else if(m[2]) ports(m[2],w+'.ip'); }); });
+  (acl.acls||[]).forEach((a,i)=>{ const w=`acls[${i}]`;
+    if(a.action&&a.action!=='accept') err(`${w}: action "${a.action}" is not allowed; ACL rules can only accept`);
+    collect(a.src,w+'.src'); if(!(a.src||[]).length) err(`${w} has no src`); if(!(a.dst||[]).length) err(`${w} has no dst`);
+    (a.dst||[]).forEach(d=>{ const k=String(d).lastIndexOf(':'); const port=k>0?d.slice(k+1):null;
+      if(port==null||!/^(\*|\d+(-\d+)?(,\d+(-\d+)?)*)$/.test(port)) err(`${w}.dst: "${d}" needs a port suffix, e.g. "${d}:*"`); else { ports(port,w+'.dst'); refs.push([d.slice(0,k),w+'.dst']); } }); });
+  (acl.ssh||[]).forEach((r,i)=>{ const w=`ssh[${i}]`; collect(r.src,w+'.src'); collect(r.dst,w+'.dst');
+    if(!['accept','check'].includes(r.action)) err(`${w}: action must be accept or check`); if(!(r.users||[]).length) err(`${w} has no users`);
+    (r.dst||[]).forEach(d=>{ if(!/^(tag:|autogroup:self$)/.test(d)&&!d.includes('@')) warn(`${w}.dst: "${d}" is not a tag, user or autogroup:self; SSH destinations are usually tags`); }); });
+  Object.entries((acl.autoApprovers||{}).routes||{}).forEach(([r,o])=>{ if(!checkAddr(r,'autoApprovers.routes')) err(`autoApprovers.routes: "${r}" is not a CIDR`); collect(o,'autoApprovers.routes.'+r); });
+  collect((acl.autoApprovers||{}).exitNode,'autoApprovers.exitNode');
+  (acl.tests||[]).forEach((t,i)=>{ if(typeof t.src==='string') refs.push([t.src,`tests[${i}].src`]); else err(`tests[${i}] has no src`); if(!t.accept&&!t.deny) err(`tests[${i}] has neither accept nor deny`); });
+
+  const seen=new Set();
+  refs.forEach(([x,where])=>{ const key=x+'|'+where; if(seen.has(key))return; seen.add(key);
+    if(x==='*'||x.includes('@'))return;
+    if(x.startsWith('group:')){ if(!(x in groups)) err(`${where}: ${x} is not defined in groups`); return; }
+    if(x.startsWith('host:')){ if(!(x.slice(5) in hosts)) err(`${where}: ${x} is not defined in hosts`); return; }
+    if(x.startsWith('ipset:')){ if(!(x in ipsets)) err(`${where}: ${x} is not defined in ipsets`); return; }
+    if(x.startsWith('tag:')){ if(!(x in tags)) warn(`${where}: ${x} has no tagOwners entry, so nobody can apply it`); return; }
+    if(x.startsWith('autogroup:')){ if(!AUTOGROUPS.has(x.slice(10))) warn(`${where}: unknown ${x}`); return; }
+    if(x.startsWith('app:')||x.startsWith('ipset:'))return;
+    if(/^[\d.]+(\/\d+)?$/.test(x)||x.includes(':')&&/^[0-9a-f:\/]+$/i.test(x)){ if(!checkAddr(x,where)) err(`${where}: "${x}" is not a valid IP address or CIDR`); return; }
+    if(x in hosts) return;
+    err(`${where}: "${x}" is not a user, group:, tag:, host:, ipset:, autogroup:, IP or CIDR`); });
+  return P;
+}
+function renderProblems(P){
+  const sec=document.getElementById('probsec'); sec.hidden=!P.length; if(!P.length)return;
+  const ne=P.filter(p=>p.l==='error').length, nw=P.length-ne;
+  document.getElementById('probsum').textContent=[ne&&`${ne} error${ne>1?'s':''}`,nw&&`${nw} warning${nw>1?'s':''}`].filter(Boolean).join(', ');
+  document.getElementById('problems').innerHTML=P.map(p=>`<li><span class="tag ${p.l==='error'?'err':'warn'}">${p.l}</span>${esc(p.m)}</li>`).join('');
+}
+
 // ---------- wiring ----------
 const srcEl=document.getElementById('src'), errEl=document.getElementById('err');
 function render(){
   errEl.textContent='';
   const text=srcEl.value.trim(); if(!text){ document.getElementById('graph').replaceChildren(); return; }
-  let acl; try{ acl=parseHuJSON(text); }catch(e){ errEl.textContent='Could not parse: '+e.message; return; }
+  let acl; try{ acl=parseHuJSON(text); }catch(e){ errEl.textContent='Could not parse: '+describeParseError(text,e); renderProblems([{l:'error',m:'Could not parse: '+describeParseError(text,e)}]); return; }
+  if(!acl||typeof acl!=='object'||Array.isArray(acl)){ errEl.textContent='The policy must be a JSON object.'; return; }
+  try{ renderProblems(validate(acl)); }catch(e){ console.error(e); }
+  if(!['groups','grants','acls','hosts','tagOwners','ssh'].some(k=>acl&&typeof acl==='object'&&k in acl)){ errEl.textContent='Parsed, but found no groups, grants, acls, hosts, tagOwners or ssh sections. Is this a Tailscale policy file?'; }
   try{ const m=buildModel(acl); drawGraph(m); renderTables(m); renderNotes(m); }
   catch(e){ errEl.textContent='Could not render: '+e.message; console.error(e); }
 }
